@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Auth (NextAuth Prisma adapter — standard shape) -----------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+
+  accounts Account[]
+  sessions Session[]
+  profiles SearchProfile[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// --- Core domain -------------------------------------------------------
+
+// A saved search that the matching job re-runs against fresh listings.
+// One user can have several (e.g. "myself, near campus" + "backup options").
+model SearchProfile {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name   String
+
+  // Location — either a place name (geocoded by the provider) or explicit
+  // coordinates + radius; supports "global" by not hardcoding country enums.
+  city      String?
+  region    String?
+  country   String
+  lat       Float?
+  lng       Float?
+  radiusKm  Float   @default(10)
+
+  minPrice Int?
+  maxPrice Int
+  currency String @default("USD")
+
+  minBedrooms  Float?
+  minBathrooms Float?
+
+  moveInEarliest DateTime?
+  moveInLatest   DateTime?
+
+  // Free-form amenity keys (e.g. "gym", "in_unit_laundry", "furnished",
+  // "parking", "pet_friendly", "wifi_included") matched against each
+  // listing's own amenities array — see lib/matching/score.ts.
+  amenities       String[]
+  petFriendly     Boolean @default(false)
+  studentFriendly Boolean @default(false)
+  minRating       Float?
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  matches Match[]
+
+  @@index([userId])
+}
+
+// A normalized listing pulled from a provider adapter (see
+// lib/providers/types.ts). "source" + "externalId" is how we dedupe when
+// the same unit is re-fetched or appears via more than one provider.
+model Listing {
+  id          String  @id @default(cuid())
+  source      String
+  externalId  String
+  title       String
+  description String? @db.Text
+  url         String
+
+  addressLine String?
+  city        String?
+  region      String?
+  country     String
+  postalCode  String?
+  lat         Float?
+  lng         Float?
+
+  price         Int
+  currency      String @default("USD")
+  priceInterval String @default("month") // "month" | "week" | "night"
+
+  bedrooms  Float?
+  bathrooms Float?
+  amenities String[]
+
+  petFriendly   Boolean   @default(false)
+  availableFrom DateTime?
+  images        String[]
+
+  rating      Float?
+  reviewCount Int?
+
+  raw       Json?
+  fetchedAt DateTime @default(now())
+
+  matches Match[]
+
+  @@unique([source, externalId])
+  @@index([country, city])
+  @@index([lat, lng])
+}
+
+// One row per (profile, listing) pair that scored above the profile's
+// threshold. Notifying is idempotent via notifiedAt.
+model Match {
+  id        String   @id @default(cuid())
+  profileId String
+  profile   SearchProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  score      Float
+  notifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([profileId, listingId])
+  @@index([profileId, notifiedAt])
+}
+
+// Cache of "what's nearby" lookups (gyms, universities, restaurants, parks,
+// grocery, transit) so we don't re-call the places provider on every page
+// view. Keyed by rounded coordinates + category — see
+// lib/neighborhood/googlePlaces.ts.
+model NeighborhoodCache {
+  id        String   @id @default(cuid())
+  latKey    Float
+  lngKey    Float
+  category  String
+  data      Json
+  fetchedAt DateTime @default(now())
+
+  @@unique([latKey, lngKey, category])
+}
