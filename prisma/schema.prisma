@@ -164,17 +164,26 @@ model Match {
   @@index([profileId, notifiedAt])
 }
 
-// Cache of "what's nearby" lookups (gyms, universities, restaurants, parks,
-// grocery, transit) so we don't re-call the places provider on every page
-// view. Keyed by rounded coordinates + category — see
-// lib/neighborhood/googlePlaces.ts.
-model NeighborhoodCache {
+// Raw responses from metered external APIs (RentCast, Google Places), keyed
+// per provider by a normalized query string. Freshness is decided by each
+// caller; stale rows are still served when the monthly budget runs out.
+// See lib/providers/cache.ts.
+model ProviderCache {
   id        String   @id @default(cuid())
-  latKey    Float
-  lngKey    Float
-  category  String
+  provider  String
+  queryKey  String
   data      Json
   fetchedAt DateTime @default(now())
 
-  @@unique([latKey, lngKey, category])
+  @@unique([provider, queryKey])
+}
+
+// Real API requests made per provider per calendar month (UTC), so a free
+// tier's quota can't be blown through by searches or the daily cron.
+model ProviderUsage {
+  provider String
+  month    String // "YYYY-MM"
+  count    Int    @default(0)
+
+  @@id([provider, month])
 }

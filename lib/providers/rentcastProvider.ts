@@ -1,21 +1,26 @@
 import type { ListingProvider, NormalizedListing, SearchCriteria } from "./types";
+import { envInt, getCachedResponse, isFresh, reserveMonthlyRequest, setCachedResponse } from "./cache";
 
 /**
- * RentCast (https://www.rentcast.io/api) — a legitimate, licensed rental
- * listing API with a metered free tier, covering the US market. This is the
- * first "real" provider so the MVP has at least one non-mock data source;
- * it is intentionally US-only for now. Adding coverage elsewhere means
- * adding another file implementing ListingProvider (e.g. a UK adapter
- * against Zoopla's partner API, an AU adapter against Domain's API) and
- * registering it in ./index.ts — see lib/providers/README.md.
+ * RentCast (https://www.rentcast.io/api) — a licensed rental listing API,
+ * US-only. Adding coverage elsewhere means adding another ListingProvider
+ * (see lib/providers/README.md), not widening this one.
  *
- * Field names below follow RentCast's documented "long-term rental
- * listings" response shape as of integration time; if their API evolves,
- * update the mapping in `normalize()` only — nothing else in the app
- * depends on RentCast's raw shape.
+ * RentCast's free tier has a small monthly request quota, so every call goes
+ * through a DB cache (RENTCAST_CACHE_HOURS) and a monthly budget
+ * (RENTCAST_MONTHLY_REQUEST_LIMIT). The cache key only contains the params
+ * RentCast itself filters on; price/bedroom/pet filters run locally, so
+ * different budgets in the same city share one API call.
+ *
+ * Field names in `normalize()` follow RentCast's documented long-term rental
+ * listing shape; nothing else in the app depends on RentCast's raw format.
  */
 
 const BASE_URL = "https://api.rentcast.io/v1";
+const PROVIDER = "rentcast";
+const FETCH_LIMIT = 100;
+const KM_PER_MILE = 1.609344;
+const US_ALIASES = new Set(["us", "usa", "united states", "united states of america"]);
 
 interface RentCastListing {
   id: string;
@@ -29,13 +34,10 @@ interface RentCastListing {
   price?: number;
   bedrooms?: number;
   bathrooms?: number;
-  squareFootage?: number;
   propertyType?: string;
-  listingType?: string;
   status?: string;
   listedDate?: string;
   availableDate?: string;
-  daysOnMarket?: number;
   photos?: string[];
   features?: Record<string, unknown> | null;
 }
@@ -50,17 +52,17 @@ function toAmenities(features: RentCastListing["features"]): string[] {
   return amenities;
 }
 
-function normalize(item: RentCastListing, fallbackCountry: string): NormalizedListing | null {
-  if (!item.price || item.price <= 0) return null;
+function normalize(item: RentCastListing): NormalizedListing | null {
+  if (!item.id || !item.price || item.price <= 0) return null;
   return {
-    source: "rentcast",
+    source: PROVIDER,
     externalId: item.id,
     title: item.formattedAddress ?? item.addressLine1 ?? "Rental listing",
     url: `https://www.rentcast.io/listing/${item.id}`,
     addressLine: item.addressLine1,
     city: item.city,
     region: item.state,
-    country: fallbackCountry || "US",
+    country: "US",
     postalCode: item.zipCode,
     lat: item.latitude,
     lng: item.longitude,
@@ -77,49 +79,78 @@ function normalize(item: RentCastListing, fallbackCountry: string): NormalizedLi
   };
 }
 
+/** Returns null when the criteria don't pin down a location worth a paid call. */
+function buildQuery(criteria: SearchCriteria): URLSearchParams | null {
+  const params = new URLSearchParams();
+  if (criteria.lat != null && criteria.lng != null) {
+    params.set("latitude", String(criteria.lat));
+    params.set("longitude", String(criteria.lng));
+    params.set("radius", ((criteria.radiusKm ?? 10) / KM_PER_MILE).toFixed(1));
+  } else if (criteria.city?.trim()) {
+    params.set("city", criteria.city.trim());
+    if (criteria.region?.trim()) params.set("state", criteria.region.trim());
+  } else {
+    return null;
+  }
+  params.set("status", "Active");
+  params.set("limit", String(FETCH_LIMIT));
+  params.sort();
+  return params;
+}
+
+async function loadListings(apiKey: string, query: URLSearchParams): Promise<RentCastListing[]> {
+  const queryKey = query.toString();
+  const cached = await getCachedResponse<RentCastListing[]>(PROVIDER, queryKey);
+  if (cached && isFresh(cached.fetchedAt, envInt("RENTCAST_CACHE_HOURS", 12) * 60 * 60 * 1000)) {
+    return cached.data;
+  }
+
+  const limit = envInt("RENTCAST_MONTHLY_REQUEST_LIMIT", 45);
+  if (!(await reserveMonthlyRequest(PROVIDER, limit))) {
+    console.warn(`RentCast monthly request budget (${limit}) used up; serving ${cached ? "stale cache" : "no results"}.`);
+    return cached?.data ?? [];
+  }
+
+  const res = await fetch(`${BASE_URL}/listings/rental/long-term?${queryKey}`, {
+    headers: { "X-Api-Key": apiKey, Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    console.error(`RentCast search failed: ${res.status} ${await res.text()}`);
+    return cached?.data ?? [];
+  }
+
+  const data: unknown = await res.json();
+  if (!Array.isArray(data)) {
+    console.error("RentCast returned a non-array response:", data);
+    return cached?.data ?? [];
+  }
+  await setCachedResponse(PROVIDER, queryKey, data);
+  return data as RentCastListing[];
+}
+
 export const rentcastProvider: ListingProvider = {
-  key: "rentcast",
+  key: PROVIDER,
   label: "RentCast (US)",
   isConfigured: () => Boolean(process.env.RENTCAST_API_KEY),
   async search(criteria: SearchCriteria): Promise<NormalizedListing[]> {
     const apiKey = process.env.RENTCAST_API_KEY;
-    if (!apiKey) return [];
+    if (!apiKey || !US_ALIASES.has(criteria.country.trim().toLowerCase())) return [];
 
-    const params = new URLSearchParams();
-    if (criteria.city) params.set("city", criteria.city);
-    if (criteria.region) params.set("state", criteria.region);
-    if (criteria.lat != null && criteria.lng != null) {
-      params.set("latitude", String(criteria.lat));
-      params.set("longitude", String(criteria.lng));
-      params.set("radius", String(criteria.radiusKm ?? 10));
-    }
-    if (criteria.minBedrooms != null) params.set("bedrooms", String(criteria.minBedrooms));
-    params.set("status", "Active");
-    params.set("limit", String(Math.min(criteria.limit ?? 20, 50)));
+    const query = buildQuery(criteria);
+    if (!query) return [];
 
-    const res = await fetch(`${BASE_URL}/listings/rental/long-term?${params.toString()}`, {
-      headers: { "X-Api-Key": apiKey, Accept: "application/json" },
-      // Listing data changes over hours, not seconds — cache briefly to
-      // stay well inside the free-tier request quota.
-      next: { revalidate: 900 },
-    });
-
-    if (!res.ok) {
-      console.error(`RentCast search failed: ${res.status} ${await res.text()}`);
-      return [];
-    }
-
-    const data = (await res.json()) as RentCastListing[];
-    const maxPrice = criteria.maxPrice;
     const minPrice = criteria.minPrice ?? 0;
-
-    return data
-      .map((item) => normalize(item, criteria.country))
+    return (await loadListings(apiKey, query))
+      .map(normalize)
       .filter((listing): listing is NormalizedListing => {
         if (!listing) return false;
-        if (listing.price < minPrice || listing.price > maxPrice) return false;
+        if (listing.price < minPrice || listing.price > criteria.maxPrice) return false;
+        if (criteria.minBedrooms != null && (listing.bedrooms ?? 0) < criteria.minBedrooms) return false;
+        if (criteria.minBathrooms != null && (listing.bathrooms ?? 0) < criteria.minBathrooms) return false;
         if (criteria.petFriendly && !listing.petFriendly) return false;
         return true;
-      });
+      })
+      .slice(0, criteria.limit ?? FETCH_LIMIT);
   },
 };

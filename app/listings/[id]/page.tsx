@@ -81,11 +81,9 @@ export default async function ListingDetailPage({ params }: { params: Promise<{ 
                   <h3 className="mb-2 text-sm font-semibold text-slate-900">{category.label}</h3>
                   <ul className="space-y-1.5 text-sm text-slate-600">
                     {places.map((place, i) => (
-                      <li key={i} className="flex items-center justify-between gap-2">
+                      <li key={i}>
                         <span>{place.name}</span>
-                        {place.rating != null && (
-                          <span className="shrink-0 text-xs text-slate-400">★ {place.rating.toFixed(1)}</span>
-                        )}
+                        {place.address && <span className="block text-xs text-slate-400">{place.address}</span>}
                       </li>
                     ))}
                   </ul>

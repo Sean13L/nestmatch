@@ -1,96 +1,105 @@
-import { prisma } from "@/lib/prisma";
+import { envInt, getCachedResponse, isFresh, reserveMonthlyRequest, setCachedResponse } from "@/lib/providers/cache";
 
 /**
  * "Fitness, student life, surrounding community, local food and
- * recreation" — implemented as nearby-places lookups against the Google
- * Places API (Nearby Search), one category at a time, cached in
- * NeighborhoodCache so a listing page doesn't re-hit the API on every view.
- * Requires GOOGLE_PLACES_API_KEY; when unset, callers get an empty result
- * and the UI simply omits the section rather than erroring.
+ * recreation" — one Places API (New) Nearby Search per category, cached per
+ * ~110m grid cell for 14 days and capped by GOOGLE_PLACES_MONTHLY_REQUEST_LIMIT.
+ * Without GOOGLE_PLACES_API_KEY this returns {} and the listing page hides
+ * the section.
+ *
+ * The field mask is deliberately limited to name + short address: asking
+ * for rating/userRatingCount moves every call to Google's pricier Nearby
+ * Search SKU tier.
  */
+
+const PROVIDER = "google_places";
+const ENDPOINT = "https://places.googleapis.com/v1/places:searchNearby";
+const FIELD_MASK = "places.displayName,places.shortFormattedAddress";
+const CACHE_MS = 14 * 24 * 60 * 60 * 1000;
 
 export interface NeighborhoodCategory {
   key: string;
   label: string;
-  googleType: string;
+  includedTypes: string[];
   radiusMeters: number;
 }
 
 export const NEIGHBORHOOD_CATEGORIES: NeighborhoodCategory[] = [
-  { key: "fitness", label: "Fitness", googleType: "gym", radiusMeters: 2000 },
-  { key: "student_life", label: "Student life", googleType: "university", radiusMeters: 5000 },
-  { key: "food", label: "Local food", googleType: "restaurant", radiusMeters: 1200 },
-  { key: "recreation", label: "Recreation", googleType: "park", radiusMeters: 2000 },
-  { key: "community", label: "Community & errands", googleType: "grocery_or_supermarket", radiusMeters: 1500 },
+  { key: "fitness", label: "Fitness", includedTypes: ["gym"], radiusMeters: 2000 },
+  { key: "student_life", label: "Student life", includedTypes: ["university"], radiusMeters: 5000 },
+  { key: "food", label: "Local food", includedTypes: ["restaurant", "cafe"], radiusMeters: 1200 },
+  { key: "recreation", label: "Recreation", includedTypes: ["park"], radiusMeters: 2000 },
+  { key: "community", label: "Community & errands", includedTypes: ["grocery_store", "supermarket"], radiusMeters: 1500 },
 ];
 
 export interface NeighborhoodPlace {
   name: string;
-  vicinity?: string;
-  rating?: number;
-  userRatingsTotal?: number;
+  address?: string;
 }
 
 export type NeighborhoodInsights = Record<string, NeighborhoodPlace[]>;
 
-// Round to ~110m grid cells so nearby listings share a cache entry.
-function cacheKey(lat: number, lng: number) {
-  return { latKey: Math.round(lat * 1000) / 1000, lngKey: Math.round(lng * 1000) / 1000 };
+interface SearchNearbyResponse {
+  places?: { displayName?: { text?: string }; shortFormattedAddress?: string }[];
 }
 
-async function fetchCategory(lat: number, lng: number, category: NeighborhoodCategory): Promise<NeighborhoodPlace[]> {
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-  if (!apiKey) return [];
+async function fetchCategory(
+  apiKey: string,
+  lat: number,
+  lng: number,
+  category: NeighborhoodCategory
+): Promise<NeighborhoodPlace[]> {
+  const queryKey = `${lat},${lng}:${category.key}`;
+  const cached = await getCachedResponse<NeighborhoodPlace[]>(PROVIDER, queryKey);
+  if (cached && isFresh(cached.fetchedAt, CACHE_MS)) return cached.data;
 
-  const { latKey, lngKey } = cacheKey(lat, lng);
-  const cached = await prisma.neighborhoodCache.findUnique({
-    where: { latKey_lngKey_category: { latKey, lngKey, category: category.key } },
-  });
-  const ONE_DAY = 24 * 60 * 60 * 1000;
-  if (cached && Date.now() - cached.fetchedAt.getTime() < 14 * ONE_DAY) {
-    return cached.data as unknown as NeighborhoodPlace[];
+  const limit = envInt("GOOGLE_PLACES_MONTHLY_REQUEST_LIMIT", 4500);
+  if (!(await reserveMonthlyRequest(PROVIDER, limit))) {
+    console.warn(`Google Places monthly request budget (${limit}) used up.`);
+    return cached?.data ?? [];
   }
 
-  const url = new URL("https://maps.googleapis.com/maps/api/place/nearbysearch/json");
-  url.searchParams.set("location", `${lat},${lng}`);
-  url.searchParams.set("radius", String(category.radiusMeters));
-  url.searchParams.set("type", category.googleType);
-  url.searchParams.set("key", apiKey);
-
-  const res = await fetch(url.toString());
+  const res = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": FIELD_MASK,
+    },
+    body: JSON.stringify({
+      includedTypes: category.includedTypes,
+      maxResultCount: 6,
+      locationRestriction: {
+        circle: { center: { latitude: lat, longitude: lng }, radius: category.radiusMeters },
+      },
+    }),
+    cache: "no-store",
+  });
   if (!res.ok) {
-    console.error(`Google Places lookup failed for ${category.key}: ${res.status}`);
-    return cached ? (cached.data as unknown as NeighborhoodPlace[]) : [];
+    console.error(`Google Places lookup failed for ${category.key}: ${res.status} ${await res.text()}`);
+    return cached?.data ?? [];
   }
 
-  interface GooglePlacesResult {
-    name: string;
-    vicinity?: string;
-    rating?: number;
-    user_ratings_total?: number;
-  }
-  const json: { results?: GooglePlacesResult[] } = await res.json();
-  const places: NeighborhoodPlace[] = (json.results ?? []).slice(0, 6).map((r) => ({
-    name: r.name,
-    vicinity: r.vicinity,
-    rating: r.rating,
-    userRatingsTotal: r.user_ratings_total,
-  }));
-
-  await prisma.neighborhoodCache.upsert({
-    where: { latKey_lngKey_category: { latKey, lngKey, category: category.key } },
-    create: { latKey, lngKey, category: category.key, data: places as unknown as object },
-    update: { data: places as unknown as object, fetchedAt: new Date() },
-  });
-
+  const json: SearchNearbyResponse = await res.json();
+  const places: NeighborhoodPlace[] = (json.places ?? []).flatMap((p) =>
+    p.displayName?.text ? [{ name: p.displayName.text, address: p.shortFormattedAddress }] : []
+  );
+  await setCachedResponse(PROVIDER, queryKey, places);
   return places;
 }
 
 export async function getNeighborhoodInsights(lat: number, lng: number): Promise<NeighborhoodInsights> {
-  if (!process.env.GOOGLE_PLACES_API_KEY) return {};
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) return {};
+
+  // Snap to a ~110m grid so nearby listings share both the query and the cache entry.
+  const cellLat = Math.round(lat * 1000) / 1000;
+  const cellLng = Math.round(lng * 1000) / 1000;
 
   const entries = await Promise.all(
-    NEIGHBORHOOD_CATEGORIES.map(async (category) => [category.key, await fetchCategory(lat, lng, category)] as const)
+    NEIGHBORHOOD_CATEGORIES.map(
+      async (category) => [category.key, await fetchCategory(apiKey, cellLat, cellLng, category)] as const
+    )
   );
   return Object.fromEntries(entries);
 }

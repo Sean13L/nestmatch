@@ -19,6 +19,11 @@ not an unauthorized scraper.
 - `rentcastProvider.ts` — [RentCast](https://www.rentcast.io/api), US-only,
   licensed rental data API with a free tier. Set `RENTCAST_API_KEY`.
 
+Any adapter that calls a metered API must go through `cache.ts`
+(`getCachedResponse` / `reserveMonthlyRequest` / `setCachedResponse`), as
+`rentcastProvider.ts` does, so searches and the daily cron share cached
+responses and can't exceed the provider's monthly quota.
+
 ## Adding global coverage
 
 "Global" coverage grows one legitimate regional source at a time. Candidates

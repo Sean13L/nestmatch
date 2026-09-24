@@ -20,8 +20,7 @@ export const mockProvider: ListingProvider = {
   isConfigured: () => true,
   async search(criteria: SearchCriteria): Promise<NormalizedListing[]> {
     const count = Math.min(criteria.limit ?? 8, 12);
-    const baseLat = criteria.lat ?? 0;
-    const baseLng = criteria.lng ?? 0;
+    const hasCenter = criteria.lat != null && criteria.lng != null;
     const city = criteria.city ?? "Sample City";
 
     const listings: NormalizedListing[] = [];
@@ -41,8 +40,8 @@ export const mockProvider: ListingProvider = {
         city,
         region: criteria.region,
         country: criteria.country,
-        lat: baseLat + (Math.random() - 0.5) * 0.05,
-        lng: baseLng + (Math.random() - 0.5) * 0.05,
+        lat: hasCenter ? criteria.lat! + (Math.random() - 0.5) * 0.05 : undefined,
+        lng: hasCenter ? criteria.lng! + (Math.random() - 0.5) * 0.05 : undefined,
         price: Math.max(price, 1),
         currency: criteria.currency ?? "USD",
         priceInterval: "month",

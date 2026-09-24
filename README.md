@@ -43,8 +43,8 @@ Per the actual first build:
   (`lib/matching/score.ts`), and emails a digest of new matches via Resend.
 - **Neighborhood info** — a listing's detail page surfaces nearby fitness
   (gyms), student life (universities), local food (restaurants), recreation
-  (parks), and community/errands (grocery) via the Google Places API,
-  cached in `NeighborhoodCache` so repeat views don't re-hit the API.
+  (parks), and community/errands (grocery) via Google Places API (New),
+  cached in `ProviderCache` so repeat views don't re-hit the API.
 - **Reviews** — surfaced wherever the underlying provider supplies a rating
   (`Listing.rating` / `reviewCount`), and usable as a saved-profile filter
   (`minRating`). Aggregating third-party reviews beyond what a listing
@@ -58,14 +58,14 @@ aggregation layer.
 
 ## Stack
 
-- Next.js 14 (App Router) + TypeScript + Tailwind
+- Next.js 16 (App Router) + TypeScript + Tailwind
 - Prisma + PostgreSQL
 - NextAuth (Google OAuth + Resend-backed magic links) — `session: database`
   strategy, so signing out anywhere revokes the session everywhere
 - Resend for transactional email (magic links + match-notification digests)
 - Vercel Cron for the daily matching job (`vercel.json`)
-- Google Places API for neighborhood insights (optional — the app runs
-  without it, just without that section)
+- Google Places API (New) for neighborhood insights (optional — the app
+  runs without it, just without that section)
 
 ## Known audit finding: `nodemailer`
 
@@ -96,7 +96,9 @@ dev — unset integrations degrade gracefully:
 
 | Env var | Missing → |
 |---|---|
-| `RENTCAST_API_KEY` | Search/matching falls back to the deterministic mock provider |
+| `RENTCAST_API_KEY` | Search/matching falls back to the deterministic mock provider. Once set, non-US searches return nothing (RentCast is US-only) rather than sample data |
+| `RENTCAST_CACHE_HOURS` / `RENTCAST_MONTHLY_REQUEST_LIMIT` | Defaults 12h / 45 requests per month. Set the limit to your RentCast plan's quota |
+| `GOOGLE_PLACES_MONTHLY_REQUEST_LIMIT` | Default 4500 requests per calendar month (UTC) |
 | `RESEND_API_KEY` | Magic links and match emails are logged to the console instead of sent |
 | `GOOGLE_CLIENT_ID`/`SECRET` | Google sign-in button errors if clicked; email sign-in still works |
 | `GOOGLE_PLACES_API_KEY` | Listing pages omit the neighborhood section |
@@ -118,11 +120,32 @@ dev — unset integrations degrade gracefully:
   a listing found via ad-hoc search and later matched to a saved profile is
   the same row, and idempotent by the `(profileId, listingId)` unique
   constraint on `Match` — safe to re-run.
-- **`lib/neighborhood/googlePlaces.ts`** — one Nearby-Search call per
-  category (`fitness`/`student_life`/`food`/`recreation`/`community`),
-  cached per ~110m grid cell for two weeks in `NeighborhoodCache` so a
-  cluster of listings in the same area shares lookups instead of each
-  paying for its own.
+- **`lib/providers/cache.ts`** — every metered external API goes through
+  this: `ProviderCache` stores raw responses per provider + query key, and
+  `ProviderUsage` counts real requests per calendar month. The budget is
+  reserved atomically before each call, so concurrent searches and the cron
+  can't overshoot a free tier. When the budget is spent, stale cache is
+  served instead of calling out.
+- **`lib/neighborhood/googlePlaces.ts`** — one Places API (New) Nearby
+  Search per category (`fitness`/`student_life`/`food`/`recreation`/
+  `community`), snapped to a ~110m grid cell and cached for two weeks so
+  nearby listings share lookups. The field mask asks only for name and
+  short address; adding rating fields moves every call to Google's pricier
+  Nearby Search SKU.
+
+## Applying schema changes to production
+
+There's no migrations folder yet (CI and local dev use `prisma db push`).
+Production (Neon) is updated by hand: generate the SQL for the change with
+
+```bash
+git show <last-deployed-commit>:prisma/schema.prisma > /tmp/old.prisma
+npx prisma migrate diff --from-schema-datamodel /tmp/old.prisma \
+  --to-schema-datamodel prisma/schema.prisma --script
+```
+
+and run it in Neon's SQL Editor **before** enabling any code path that
+depends on it.
 
 ## Roadmap
 
