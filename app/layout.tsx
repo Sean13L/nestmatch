@@ -39,6 +39,16 @@ export default function RootLayout({
             </div>
           </header>
           <main className="mx-auto max-w-6xl px-4 py-8">{children}</main>
+          <footer className="border-t border-slate-200">
+            <div className="mx-auto flex max-w-6xl gap-6 px-4 py-6 text-sm text-slate-500">
+              <Link href="/privacy" className="hover:text-slate-900">
+                Privacy
+              </Link>
+              <Link href="/terms" className="hover:text-slate-900">
+                Terms
+              </Link>
+            </div>
+          </footer>
         </Providers>
       </body>
     </html>

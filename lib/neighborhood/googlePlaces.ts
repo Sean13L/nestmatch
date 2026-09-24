@@ -59,22 +59,29 @@ async function fetchCategory(
     return cached?.data ?? [];
   }
 
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask": FIELD_MASK,
-    },
-    body: JSON.stringify({
-      includedTypes: category.includedTypes,
-      maxResultCount: 6,
-      locationRestriction: {
-        circle: { center: { latitude: lat, longitude: lng }, radius: category.radiusMeters },
+  let res: Response;
+  try {
+    res = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": FIELD_MASK,
       },
-    }),
-    cache: "no-store",
-  });
+      body: JSON.stringify({
+        includedTypes: category.includedTypes,
+        maxResultCount: 6,
+        locationRestriction: {
+          circle: { center: { latitude: lat, longitude: lng }, radius: category.radiusMeters },
+        },
+      }),
+      cache: "no-store",
+    });
+  } catch (err) {
+    // A network failure must not take down the listing page that rendered us.
+    console.error(`Google Places request failed for ${category.key}:`, err);
+    return cached?.data ?? [];
+  }
   if (!res.ok) {
     console.error(`Google Places lookup failed for ${category.key}: ${res.status} ${await res.text()}`);
     return cached?.data ?? [];

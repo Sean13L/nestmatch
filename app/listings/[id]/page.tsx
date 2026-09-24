@@ -9,7 +9,8 @@ export default async function ListingDetailPage({ params }: { params: Promise<{ 
 
   const insights =
     listing.lat != null && listing.lng != null ? await getNeighborhoodInsights(listing.lat, listing.lng) : {};
-  const hasInsights = Object.keys(insights).length > 0;
+  const lookedUp = Object.keys(insights).length > 0;
+  const hasPlaces = Object.values(insights).some((places) => places.length > 0);
 
   const price = new Intl.NumberFormat(undefined, { style: "currency", currency: listing.currency, maximumFractionDigits: 0 }).format(
     listing.price
@@ -66,10 +67,14 @@ export default async function ListingDetailPage({ params }: { params: Promise<{ 
 
       <div>
         <h2 className="mb-3 text-lg font-medium text-slate-900">Neighborhood</h2>
-        {!hasInsights ? (
+        {!lookedUp ? (
           <p className="text-sm text-slate-500">
             Neighborhood data isn&apos;t available for this listing yet — either it has no location on file, or
             GOOGLE_PLACES_API_KEY isn&apos;t configured.
+          </p>
+        ) : !hasPlaces ? (
+          <p className="text-sm text-slate-500">
+            No gyms, campuses, restaurants, parks or grocery stores found near this listing.
           </p>
         ) : (
           <div className="space-y-4">

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
 import { searchAllProviders } from "@/lib/providers";
+import { upsertListings } from "@/lib/listings/upsert";
 
 const searchSchema = z.object({
   city: z.string().optional(),
@@ -31,24 +31,6 @@ export async function POST(req: NextRequest) {
   }
   const criteria = parsed.data;
 
-  const found = await searchAllProviders({ ...criteria, limit: 30 });
-
-  const listings = await Promise.all(
-    found.map((normalized) =>
-      prisma.listing.upsert({
-        where: { source_externalId: { source: normalized.source, externalId: normalized.externalId } },
-        create: { ...normalized, raw: normalized.raw as object | undefined },
-        update: {
-          price: normalized.price,
-          amenities: normalized.amenities,
-          availableFrom: normalized.availableFrom,
-          rating: normalized.rating,
-          reviewCount: normalized.reviewCount,
-          fetchedAt: new Date(),
-        },
-      })
-    )
-  );
-
+  const listings = await upsertListings(await searchAllProviders({ ...criteria, limit: 30 }));
   return NextResponse.json({ listings });
 }

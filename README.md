@@ -103,6 +103,7 @@ dev — unset integrations degrade gracefully:
 | `GOOGLE_CLIENT_ID`/`SECRET` | Google sign-in button errors if clicked; email sign-in still works |
 | `GOOGLE_PLACES_API_KEY` | Listing pages omit the neighborhood section |
 | `CRON_SECRET` | The cron endpoint rejects all requests (fail closed, not open) |
+| `CONTACT_EMAIL` | `/privacy` and `/terms` show a "contact address not yet published" placeholder. Read at build time, so redeploy after changing it |
 
 ## Architecture notes
 
